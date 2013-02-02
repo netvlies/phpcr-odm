@@ -250,6 +250,9 @@ class UnitOfWork
         $className = $this->documentClassMapper->getClassName($this->dm, $node, $className);
         $class = $this->dm->getClassMetadata($className);
 
+        $locale = isset($hints['locale']) ? $hints['locale'] : null;
+        $fallback = isset($hints['fallback']) ? $hints['fallback'] : isset($locale);
+
         $documentState = array();
         $nonMappedData = array();
         $id = $node->getPath();
@@ -323,10 +326,10 @@ class UnitOfWork
                         $path = $referencedNode->getPath();
                     }
 
-                    $proxy = $this->createProxy($path, $referencedClass);
+                    $proxy = $this->createProxy($path, $referencedClass, $locale);
                 } else {
                     $referencedNode = $node->getProperty($fieldName)->getNode();
-                    $proxy = $this->createProxyFromNode($referencedNode);
+                    $proxy = $this->createProxyFromNode($referencedNode, $locale);
                 }
 
                 $documentState[$fieldName] = $proxy;
@@ -339,20 +342,20 @@ class UnitOfWork
                 }
 
                 $targetDocument = isset($mapping['targetDocument']) ? $mapping['targetDocument'] : null;
-                $coll = new ReferenceManyCollection($this->dm, $referencedNodes, $targetDocument);
+                $coll = new ReferenceManyCollection($this->dm, $referencedNodes, $targetDocument, $locale);
                 $documentState[$fieldName] = $coll;
             }
         }
 
         if ($class->parentMapping && $node->getDepth() > 0) {
             // do not map parent to self if we are at root
-            $documentState[$class->parentMapping] = $this->createProxyFromNode($node->getParent());
+            $documentState[$class->parentMapping] = $this->createProxyFromNode($node->getParent(), $locale);
         }
 
         foreach ($class->childMappings as $fieldName) {
             $mapping = $class->mappings[$fieldName];
             $documentState[$fieldName] = $node->hasNode($mapping['name'])
-                ? $this->createProxyFromNode($node->getNode($mapping['name']))
+                ? $this->createProxyFromNode($node->getNode($mapping['name']), $locale)
                 : null;
         }
 
@@ -386,9 +389,6 @@ class UnitOfWork
         }
 
         // Load translations
-        $locale = isset($hints['locale']) ? $hints['locale'] : null;
-        $fallback = isset($hints['fallback']) ? $hints['fallback'] : is_null($locale);
-
         $this->doLoadTranslation($document, $class, $locale, $fallback);
 
         // Invoke the postLoad lifecycle callbacks and listeners
@@ -402,22 +402,27 @@ class UnitOfWork
         return $document;
     }
 
-    public function createProxyFromNode(NodeInterface $node)
+    /**
+     * @param \PHPCR\NodeInterface $node
+     * @param string $locale
+     */
+    public function createProxyFromNode(NodeInterface $node, $locale = null)
     {
         $targetId = $node->getPath();
         $className = $this->documentClassMapper->getClassName($this->dm, $node);
-        return $this->createProxy($targetId, $className);
+        return $this->createProxy($targetId, $className, $locale);
     }
 
     /**
      * Create a proxy instance or return an existing document
      *
-     * @param $targetId
-     * @param $className
+     * @param string $targetId
+     * @param string $className
+     * @param string $locale
      *
      * @return object
      */
-    public function createProxy($targetId, $className)
+    public function createProxy($targetId, $className, $locale = null)
     {
         $document = $this->getDocumentById($targetId);
 
@@ -430,6 +435,10 @@ class UnitOfWork
 
         // register the document under its own id
         $this->registerDocument($proxyDocument, $targetId);
+
+        if ($locale) {
+            $this->setLocale($proxyDocument, $this->dm->getClassMetadata($className), $locale);
+        }
 
         return $proxyDocument;
     }
@@ -444,7 +453,14 @@ class UnitOfWork
     public function refreshDocumentForProxy($className, Proxy $document)
     {
         $node = $this->session->getNode($document->__getIdentifier());
+
         $hints = array('refresh' => true);
+        $oid = spl_object_hash($document);
+        if (isset($this->documentLocales[$oid]['current'])) {
+            $hints['locale'] = $this->documentLocales[$oid]['current'];
+            $hints['fallback'] = true;
+        }
+
         $this->createDocument($className, $node, $hints);
     }
 
@@ -470,10 +486,7 @@ class UnitOfWork
             throw new PHPCRException('This document is not translatable, do not use bindTranslation: '.self::objToStr($document, $this->dm));
         }
 
-        // Set the @Locale field
-        if ($class->localeMapping) {
-            $class->reflFields[$class->localeMapping]->setValue($document, $locale);
-        }
+        $this->setLocale($document, $class, $locale);
 
         $oid = spl_object_hash($document);
         if (empty($this->documentTranslations[$oid])) {
@@ -483,11 +496,6 @@ class UnitOfWork
         foreach ($class->translatableFields as $field) {
             $this->documentTranslations[$oid][$locale][$field] = $class->reflFields[$field]->getValue($document);
         }
-
-        if (empty($this->documentLocales[$oid])) {
-            $this->documentLocales[$oid] = array('original' => $locale);
-        }
-        $this->documentLocales[$oid]['current'] = $locale;
     }
 
     /**
@@ -1193,7 +1201,7 @@ class UnitOfWork
      * @param object $document
      * @return void
      */
-    public function persistNew($class, $document, $overrideIdGenerator = null, $parent = null)
+    public function persistNew(ClassMetadata $class, $document, $overrideIdGenerator = null, $parent = null)
     {
         if (isset($class->lifecycleCallbacks[Event::prePersist])) {
             $class->invokeLifecycleCallbacks(Event::prePersist, $document);
@@ -1209,6 +1217,13 @@ class UnitOfWork
 
         if ($generator !== ClassMetadata::GENERATOR_TYPE_ASSIGNED) {
             $class->setIdentifierValue($document, $id);
+        }
+
+        if ($class->localeMapping) {
+            $locale = $class->reflFields[$class->localeMapping]->getValue($document);
+            if ($locale) {
+                $this->bindTranslation($document, $locale);
+            }
         }
     }
 
@@ -1696,7 +1711,7 @@ class UnitOfWork
             }
             // make sure this reflects the id generator strategy generated id
             if ($class->parentMapping && !$class->reflFields[$class->parentMapping]->getValue($document)) {
-                $class->reflFields[$class->parentMapping]->setValue($document, $this->createDocument(null, $parentNode));
+                $class->reflFields[$class->parentMapping]->setValue($document, $this->createProxyFromNode($parentNode, $this->getLocale($document, $class)));
             }
 
             if ($this->writeMetadata) {
@@ -1947,7 +1962,7 @@ class UnitOfWork
                 $class->setFieldValue($document, $class->nodename, $node->getName());
             }
             if ($class->parentMapping) {
-                $class->setFieldValue($document, $class->parentMapping, $this->createProxyFromNode($node->getParent()));
+                $class->setFieldValue($document, $class->parentMapping, $this->createProxyFromNode($node->getParent(), $this->getLocale($document, $class)));
             }
 
             // update all cached children of the document to reflect the move (path id changes)
@@ -2474,7 +2489,7 @@ class UnitOfWork
             return;
         }
 
-        $locale = $this->getLocale($document, $metadata);
+        $locale = $this->getLocale($document, $metadata, false);
         if ($locale) {
             $this->bindTranslation($document, $locale);
         }
@@ -2513,26 +2528,31 @@ class UnitOfWork
             return;
         }
 
-        $oid = spl_object_hash($document);
-        // Determine which languages we will try to load
-        if (!$fallback) {
-            if (null === $locale) {
-                $localesToTry = array($this->dm->getLocaleChooserStrategy()->getDefaultLocale());
-            } else {
-                $localesToTry = array($locale);
-            }
-        } else {
-            $localesToTry = $this->getFallbackLocales($document, $metadata, $locale);
-        }
+        $currentLocale = $this->getLocale($document, $metadata);
 
         // Load translated fields for current locale
+        $oid = spl_object_hash($document);
         $node = $this->session->getNode($this->getDocumentId($oid));
         $strategy = $this->dm->getTranslationStrategy($metadata->translator);
 
-        foreach ($localesToTry as $desiredLocale) {
-            if ($strategy->loadTranslation($document, $node, $metadata, $desiredLocale)) {
-                $localeUsed = $desiredLocale;
-                break;
+        $locale = $locale ?: $currentLocale;
+        if ($locale && $strategy->loadTranslation($document, $node, $metadata, $locale)) {
+            $localeUsed = $locale;
+        } else {
+            $localesToTry = array();
+            if ($fallback) {
+                $localesToTry = $this->getFallbackLocales($document, $metadata, $locale);
+            } elseif (empty($locale)) {
+                $localesToTry = array($this->dm->getLocaleChooserStrategy()->getDefaultLocale());
+            }
+
+            foreach ($localesToTry as $desiredLocale) {
+                if ($desiredLocale === $locale
+                    || $strategy->loadTranslation($document, $node, $metadata, $desiredLocale)
+                ) {
+                    $localeUsed = $desiredLocale;
+                    break;
+                }
             }
         }
 
@@ -2541,12 +2561,62 @@ class UnitOfWork
             throw new MissingTranslationException('No translation for '.$node->getPath()." found with strategy '".$metadata->translator.'". Tried the following locales: '.var_export($localesToTry, true));
         }
 
-        // Set the locale
-        if ($localeField = $metadata->localeMapping) {
-            $metadata->reflFields[$localeField]->setValue($document, $localeUsed);
+        $this->setLocale($document, $metadata, $localeUsed);
+
+        if ($metadata->parentMapping) {
+            $parent = $metadata->reflFields[$metadata->parentMapping]->getValue($document);
+            $this->cascadeDoLoadTranslation($parent, $locale);
         }
 
-        $this->documentLocales[$oid] = array('original' => $locale, 'current' => $locale);
+        if ($metadata->childMappings) {
+            foreach ($metadata->childMappings as $fieldName) {
+                $child = $metadata->reflFields[$fieldName]->getValue($document);
+                $this->cascadeDoLoadTranslation($child, $locale);
+            }
+        }
+
+        if ($metadata->referenceMappings) {
+            foreach ($metadata->referenceMappings as $fieldName) {
+                $reference = $metadata->reflFields[$fieldName]->getValue($document);
+                if ($reference instanceof ReferenceManyCollection && !$reference->isInitialized()) {
+                    $reference->setLocale($locale);
+                } else {
+                    if ($reference instanceOf \Traversable || is_array($reference)) {
+                        foreach ($reference as $ref) {
+                            $this->cascadeDoLoadTranslation($ref, $locale);
+                        }
+                    } else {
+                        $this->cascadeDoLoadTranslation($reference, $locale);
+                    }
+                }
+            }
+        }
+
+        if ($metadata->referrersMappings) {
+            foreach ($metadata->referrersMappings as $fieldName) {
+                $referrer = $metadata->reflFields[$fieldName]->getValue($document);
+                $this->cascadeDoLoadTranslation($referrer, $locale);
+            }
+        }
+    }
+
+    private function cascadeDoLoadTranslation($document, $locale)
+    {
+        if (!$document) {
+            return;
+        }
+
+        $class = $this->dm->getClassMetadata(get_class($document));
+        if ($document instanceOf Proxy) {
+            $this->setLocale($document, $class, $locale);
+        } elseif ($this->isDocumentTranslatable($class)
+            && $this->getLocale($document, $class) !== $locale
+        ) {
+            try {
+                $this->doLoadTranslation($document, $class, $locale, true);
+            } catch (\Exception $e) {
+            }
+        }
     }
 
     public function removeTranslation($document, $locale)
@@ -2560,19 +2630,13 @@ class UnitOfWork
             throw new \RuntimeException('The last translation of a translatable document may not be removed');
         }
 
+        if ($document instanceof Proxy) {
+            $document->__load();
+        }
+
         $oid = spl_object_hash($document);
         $this->documentTranslations[$oid][$locale] = null;
-
-        $localeField = $metadata->localeMapping;
-        if ($metadata->reflFields[$localeField]->getValue($document) === $locale) {
-            $this->documentLocales[$oid] = array('original' => $locale, 'current' => null);
-
-            // Empty the locale field if what we removed was the current language
-            $localeField = $metadata->localeMapping;
-            if ($localeField) {
-                $metadata->reflFields[$localeField]->setValue($document, null);
-            }
-        }
+        $this->setLocale($document, $metadata, null);
     }
 
     private function doRemoveAllTranslations($document, ClassMetadata $metadata)
@@ -2586,25 +2650,48 @@ class UnitOfWork
         $strategy->removeAllTranslations($document, $node, $metadata);
     }
 
-    private function getLocale($document, ClassMetadata $metadata)
+    private function setLocale($document, ClassMetadata $metadata, $locale)
     {
         if (!$this->isDocumentTranslatable($metadata)) {
             return;
         }
 
-        $localeField = $metadata->localeMapping;
-        if ($localeField) {
-            $locale = $metadata->reflFields[$localeField]->getValue($document);
+        $oid = spl_object_hash($document);
+        if (empty($this->documentLocales[$oid])) {
+            $this->documentLocales[$oid] = array('original' => $locale);
+        }
+        $this->documentLocales[$oid]['current'] = $locale;
+
+        if ($metadata->localeMapping
+            && (!$document instanceof Proxy || $document->__isInitialized())
+        ) {
+            $metadata->reflFields[$metadata->localeMapping]->setValue($document, $locale);
+        }
+    }
+
+    private function getLocale($document, ClassMetadata $metadata, $fallback = true)
+    {
+        if (!$this->isDocumentTranslatable($metadata)) {
+            return;
         }
 
-        if (empty($locale)) {
-            $oid = spl_object_hash($document);
-            $locale = isset($this->documentLocales[$oid]['current'])
-                ? $this->documentLocales[$oid]['current']
-                : $this->dm->getLocaleChooserStrategy()->getLocale();
+        if ($metadata->localeMapping
+            && (!$document instanceof Proxy || $document->__isInitialized())
+        ) {
+            $locale = $metadata->reflFields[$metadata->localeMapping]->getValue($document);
+            if ($locale) {
+                return $locale;
+            }
         }
 
-        return $locale;
+        $oid = spl_object_hash($document);
+        if (isset($this->documentLocales[$oid]['current'])) {
+            return $this->documentLocales[$oid]['current'];
+        }
+
+        if ($fallback) {
+            return $this->dm->getLocaleChooserStrategy()->getLocale();
+        }
     }
 
     /**

@@ -30,7 +30,8 @@ use Doctrine\Common\Collections\ArrayCollection;
 class ReferenceManyCollection extends PersistentCollection
 {
     private $referencedNodes;
-    private $targetDocument = null;
+    private $targetDocument;
+    private $locale;
 
     /**
      * Creates a new persistent collection.
@@ -38,12 +39,14 @@ class ReferenceManyCollection extends PersistentCollection
      * @param DocumentManager $dm The DocumentManager the collection will be associated with.
      * @param array $referencedNodes An array of referenced nodes (UUID or path)
      * @param string $targetDocument the objectname of the target documents
+     * @param string $locale
      */
-    public function __construct(DocumentManager $dm, array $referencedNodes, $targetDocument)
+    public function __construct(DocumentManager $dm, array $referencedNodes, $targetDocument, $locale = null)
     {
         $this->dm = $dm;
         $this->referencedNodes = $referencedNodes;
         $this->targetDocument = $targetDocument;
+        $this->locale = $locale;
     }
 
     /**
@@ -65,8 +68,8 @@ class ReferenceManyCollection extends PersistentCollection
 
             foreach ($referencedNodes as $referencedNode) {
                 $proxy = $referencedClass
-                    ? $uow->createProxy($referencedNode->getPath(), $referencedClass)
-                    : $uow->createProxyFromNode($referencedNode);
+                    ? $uow->createProxy($referencedNode->getPath(), $referencedClass, $this->locale)
+                    : $uow->createProxyFromNode($referencedNode, $this->locale);
                 $referencedDocs[] = $proxy;
             }
 
@@ -86,5 +89,14 @@ class ReferenceManyCollection extends PersistentCollection
     public function isEmpty()
     {
         return !$this->count();
+    }
+
+    public function setLocale($locale)
+    {
+        if (null === $this->locale) {
+            return;
+        }
+
+        $this->locale = $locale;
     }
 }

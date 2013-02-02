@@ -195,6 +195,35 @@ class DocumentManagerTest extends PHPCRFunctionalTestCase
         }
     }
 
+    public function testRemoveTranslationFromProxy()
+    {
+        $this->dm->persist($this->doc);
+        $this->dm->bindTranslation($this->doc, 'en');
+        $this->doc->topic = 'Un sujet intéressant';
+        $this->dm->bindTranslation($this->doc, 'fr');
+
+        $child = new Article();
+        $child->id = $this->doc->id.'/child';
+        $child->author = 'John Doe';
+        $child->topic = 'Some interesting subject';
+        $child->setText('Lorem ipsum...');
+        $child->setSettings(array());
+        $this->dm->persist($child);
+        $this->dm->flush();
+        $this->dm->clear();
+
+        $child = $this->dm->findTranslation(null, $child->id, 'fr');
+        $this->assertInstanceOf('Doctrine\ODM\PHPCR\Proxy\Proxy', $child->parent);
+        $this->dm->removeTranslation($child->parent, 'en');
+        $this->assertEquals(array('fr'), $this->dm->getLocalesFor($child->parent));
+
+        $this->dm->flush();
+        $this->dm->clear();
+
+        $child = $this->dm->findTranslation(null, $child->id, 'fr');
+        $this->assertEquals(array('fr'), $this->dm->getLocalesFor($child->parent));
+    }
+
     /**
      * Existing document with only 'de' translation. Default language is 'en'
      *
