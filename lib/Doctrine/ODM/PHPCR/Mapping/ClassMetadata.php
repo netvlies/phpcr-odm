@@ -538,20 +538,12 @@ class ClassMetadata implements ClassMetadataInterface
 
     public function mapVersionName(array $mapping)
     {
-        if (!$this->versionable) {
-            throw new \InvalidArgumentException(sprintf("You cannot use the @VersionName annotation on the non-versionable document %s (field = %s)", $this->name, $mapping['fieldName']));
-        }
-
         $mapping = $this->validateAndCompleteFieldMapping($mapping, false);
         $this->versionNameField = $mapping['fieldName'];
     }
 
     public function mapVersionCreated(array $mapping)
     {
-        if (!$this->versionable) {
-            throw new \InvalidArgumentException(sprintf("You cannot use the @VersionName annotation on the non-versionable document %s (field = %s)", $this->name, $mapping['fieldName']));
-        }
-
         $mapping = $this->validateAndCompleteFieldMapping($mapping, false);
         $this->versionCreatedField = $mapping['fieldName'];
     }
